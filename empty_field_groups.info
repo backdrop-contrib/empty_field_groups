@@ -1,0 +1,7 @@
+name = Empty Field Groups
+description = Provides options for displaying empty field groups.
+backdrop = 1.x
+type = module
+package = Fields
+
+dependencies[] = field_group

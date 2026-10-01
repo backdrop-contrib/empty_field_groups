@@ -1,0 +1,91 @@
+<?php
+/**
+ * @file
+ * Contains the implementation for the Empty Field Groups module.
+ */
+
+/**
+ * Implements hook_autoload_info().
+ */
+function empty_field_groups_autoload_info() {
+  return array(
+    'EmptyFieldGroupHandler' => 'plugins/empty_field_groups_handler.inc',
+    'EmptyFieldGroupText' => 'plugins/empty_field_groups_handler_text.inc',
+    'EntityLabelEmptyFieldGroupHandler' => 'plugins/empty_field_groups_handler_label.inc',
+  );
+}
+
+/**
+ * Implements hook_field_group_format_settings_alter().
+ *
+ * @param array $form
+ *   An associative array containing the structure of the form, which is passed
+ *   by reference.
+ * @param object $group
+ *   The Group definition.
+ */
+function empty_field_groups_field_group_format_settings_alter(array &$form, &$group) {
+  $field_group_types = field_group_formatter_info();
+  $mode = $group->mode == 'form' ? 'form' : 'display';
+  $formatter = $field_group_types[$mode][$group->format_type];
+
+  $form['instance_settings']['empty_text'] = array(
+    '#type' => 'textarea',
+    '#title' => t('Display text if the group children are not displayed.'),
+    '#default_value' => isset($group->format_settings['instance_settings']['empty_text']) ? $group->format_settings['instance_settings']['empty_text'] : (isset($formatter['instance_settings']['empty_text']) ? $formatter['instance_settings']['empty_text'] : ''),
+    '#weight' => 20,
+  );
+
+}
+
+/**
+ * Implements hook_field_group_pre_render().
+ *
+ * @param array $element
+ *
+ * @param object $group
+ *   The Group definition
+ *
+ * @param array $form
+ */
+function empty_field_groups_field_group_pre_render_alter(&$element, $group, &$form) {
+  $has_children = FALSE;
+
+  // Form.
+  if ($group->mode == 'form') {
+    if (isset($form[$group->group_name])) {
+      foreach ($group->children as $child) {
+        if (!empty($form[$group->group_name][$child]) && $form[$group->group_name][$child]['#access']) {
+          // use _field_group_is_empty_element()?
+          $has_children = TRUE;
+        }
+      }
+    }
+  }
+  else {
+    // Display.
+    foreach ($group->children as $child) {
+      if (!empty($element[$child]) && $element[$child]['#access']) {
+        $has_children = TRUE;
+      }
+    }
+  }
+
+  // No children so display the empty text.
+  if (!$has_children) {
+    $empty_text = $group->format_settings['instance_settings']['empty_text'] ?? '';
+    switch ($group->mode) {
+      case 'form':
+        $form[$group->group_name]['empty_text'] = array(
+          '#markup' => $empty_text,
+        );
+        break;
+      default:
+        $element['empty_text'] = array(
+          '#markup' => $empty_text,
+        );
+        break;
+    }
+    $group->children[] = 'empty_text';
+  }
+}
