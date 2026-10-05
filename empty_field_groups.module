@@ -29,63 +29,186 @@ function empty_field_groups_field_group_format_settings_alter(array &$form, &$gr
   $mode = $group->mode == 'form' ? 'form' : 'display';
   $formatter = $field_group_types[$mode][$group->format_type];
 
-  $form['instance_settings']['empty_text'] = array(
-    '#type' => 'textarea',
-    '#title' => t('Display text if the group children are not displayed.'),
-    '#default_value' => isset($group->format_settings['instance_settings']['empty_text']) ? $group->format_settings['instance_settings']['empty_text'] : (isset($formatter['instance_settings']['empty_text']) ? $formatter['instance_settings']['empty_text'] : ''),
-    '#weight' => 20,
+  $form['instance_settings']['empty_handler'] = array(
+    '#type' => 'select',
+    '#title' => t('Empty display options'),
+    '#default_value' => isset($group->format_settings['instance_settings']['empty_handler']) ? $group->format_settings['instance_settings']['empty_handler'] : (isset($formatter['instance_settings']['empty_handler']) ? $formatter['instance_settings']['empty_handler'] : ''),
+    '#options' => array(
+      '' => t('Exclude field from output'),
+    ),
   );
 
+  if ($mode == 'form') {
+    $state_trigger_prefix = 'instance_settings[empty_handler]';
+  }
+  else {
+    $state_trigger_prefix = 'fields[' . $group->group_name . '][format_settings][settings][instance_settings][empty_handler]';
+  }
+
+
+  foreach (empty_field_groups_plugins() as $class_name => $class_settings) {
+    $form['instance_settings']['empty_handler']['#options'][$class_name] = $class_settings['title'];
+    $plugin = new $class_name();
+    foreach ($plugin->defaults() as $field_id => $default) {
+      $field_name = empty_field_groups_generate_field_name($field_id, $class_name);
+      $plugin->options[$field_id] = $group->format_settings['instance_settings'][$field_name] ?? ($default);
+    }
+    foreach ($plugin->form($group) as $field_id => $field) {
+      $field_name = empty_field_groups_generate_field_name($field_id, $class_name);
+      $field['#states'] = array(
+        'visible' => array(
+          ':input[name="' . $state_trigger_prefix . '"]' => array('value' => $class_name),
+        ),
+      );
+      $form['instance_settings'][$field_name] = $field;
+    }
+  }
+
+  $form['instance_settings']['empty_class'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Add class if empty'),
+    '#description' => t('Sets a CSS class on the field wrapper when the field is empty'),
+    '#default_value' => isset($group->format_settings['instance_settings']['empty_class']) ? $group->format_settings['instance_settings']['empty_class'] : (isset($formatter['instance_settings']['empty_class']) ? $formatter['instance_settings']['empty_class'] : ''),
+    '#states' => array(
+      'visible' => array(
+        ':input[name="' . $state_trigger_prefix . '"]' => array('!value' => ''),
+      ),
+    ),
+  );
 }
 
 /**
  * Implements hook_field_group_pre_render().
  *
  * @param array $element
- *
+ *   The group element.
  * @param object $group
  *   The Group definition
- *
  * @param array $form
+ *   Either the form or the display render array.
  */
 function empty_field_groups_field_group_pre_render_alter(&$element, $group, &$form) {
+  // No children so display the empty text.
+  if (_empty_field_groups_is_empty($element, $group)) {
+    $empty_classes = $group->format_settings['instance_settings']['empty_class'] ?? '';
+
+    $context = array(
+      'element' => $element,
+      'render' => $form,
+      'group' => $group,
+      'view_mode' => $group->mode,
+    );
+
+    $entity_type = $group->entity_type;
+    $entity = $form["#entity"] ?? NULL;
+    if (!$entity) {
+      $entity = $form["#{$entity_type}"] ?? NULL;
+    }
+    $context['entity_type'] = $entity_type;
+    $context['entity'] = $entity;
+    $context[$entity_type] = $entity;
+
+    // Load the configured plugin.
+    $plugin = empty_field_groups_load_plugin($group);
+
+    if ($plugin) {
+      $markup = $plugin->react($context);
+    }
+
+    if ($empty_classes) {
+      $element['#attributes']['class'] = array_merge($element['#attributes']['class'], explode(' ', $empty_classes));
+    }
+    $element['empty_handler'] = array(
+      '#markup' => $markup,
+    );
+    $group->children[] = 'empty_handler';
+  }
+}
+
+/**
+ * Is the field group empty
+ *
+ * @param array $element
+ *   The group element.
+ * @param object $group
+ *   The Group definition.
+ *
+ * @return bool
+ *   TRUE if field group is empty, FALSE otherwise.
+ */
+function _empty_field_groups_is_empty($element, $group) {
   $has_children = FALSE;
 
-  // Form.
-  if ($group->mode == 'form') {
-    if (isset($form[$group->group_name])) {
-      foreach ($group->children as $child) {
-        if (!empty($form[$group->group_name][$child]) && $form[$group->group_name][$child]['#access']) {
-          // use _field_group_is_empty_element()?
-          $has_children = TRUE;
-        }
-      }
-    }
-  }
-  else {
-    // Display.
-    foreach ($group->children as $child) {
-      if (!empty($element[$child]) && $element[$child]['#access']) {
-        $has_children = TRUE;
-      }
+  foreach ($group->children as $child) {
+    if (!empty($element[$child]) && $element[$child]['#access']) {
+      $has_children = TRUE;
     }
   }
 
-  // No children so display the empty text.
-  if (!$has_children) {
-    $empty_text = $group->format_settings['instance_settings']['empty_text'] ?? '';
-    switch ($group->mode) {
-      case 'form':
-        $form[$group->group_name]['empty_text'] = array(
-          '#markup' => $empty_text,
-        );
-        break;
-      default:
-        $element['empty_text'] = array(
-          '#markup' => $empty_text,
-        );
-        break;
+  return !$has_children;
+}
+
+/**
+ * Generate a field id to be used in the display of the plugin's form.
+ *
+ * @param string $field_id
+ *   The id of the field group as specified in the plugin.
+ * @param string $class_name
+ *   The configured emptyFieldGroupHandler for the field group.
+ *
+ * @return string
+ *   The id of the field as displayed to the user.
+ */
+function empty_field_groups_generate_field_name($field_id, $class_name) {
+  return backdrop_strtolower($class_name) . '_' . $field_id;
+}
+
+/**
+ * Implements hook_empty_field_groups().
+ */
+function empty_field_groups_empty_field_groups() {
+  $items = array(
+    'EmptyFieldGroupText' => array(
+      'title' => t('Display Custom Text'),
+    ),
+    'EntityLabelEmptyFieldGroupHandler' => array(
+      'title' => t('Display Entity Label'),
+    ),
+  );
+  return $items;
+}
+
+/**
+ * Find plugins provided by modules implementing hook_empty_field_groups().
+ */
+function empty_field_groups_plugins() {
+  static $empty_field_groups_plugins;
+  $empty_field_groups_plugins = empty($efplugins) ? module_invoke_all('empty_field_groups') : $efplugins;
+  return $empty_field_groups_plugins;
+}
+
+/**
+ * Loads a plugin from static cache if available.
+ *
+ * @param object $group
+ *   The group object.
+ *
+ * @return emptyfieldHandler
+ *   The emptyFieldHandler object for the instance's entity.
+ */
+function empty_field_groups_load_plugin($group) {
+  static $plugins;
+
+  $key = $group->format_settings['instance_settings']['empty_handler'] ?? '';
+
+  if (empty($plugins[$key]) && class_exists($key)) {
+    $plugin_type = $key;
+    $plugin = new $plugin_type();
+    foreach ($plugin->defaults() as $field_id => $default) {
+      $field_name = empty_field_groups_generate_field_name($field_id, $plugin_type);
+      $plugin->options[$field_id] = !empty($group->format_settings['instance_settings'][$field_name]) ? $group->format_settings['instance_settings'][$field_name] : $default;
     }
-    $group->children[] = 'empty_text';
+    $plugins[$key] = $plugin;
   }
+  return isset($plugins[$key]) ? $plugins[$key] : FALSE;
 }
